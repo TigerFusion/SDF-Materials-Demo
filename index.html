@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<meta charset="utf-8" />
+		<title>SDF Alpha, Reflect, and Refract</title>
+<script id="vshader" type="x-shader/x-vertex">#version 300 es
+in vec4 a_vertices;
+
+void main(void)
+{
+	gl_Position = a_vertices;
+}
+</script>
+
+<script id="fshader" type="x-shader/x-fragment">#version 300 es
+// ************************** Do Not Remove **************************
+precision highp float;
+uniform vec2 iResolution;
+uniform float iTime;
+uniform float iTimeDelta;
+
+// The old gl_FragColor
+out vec4 mainFragColor;
+// ************************** Do Not Remove **************************
+
+// I had a hard time finding any raymarching tutorials on this 
+// so I had to use ChatGPT to help figure the rest out. I did 
+// not use the exact code from ChatGPT but still noted it.
+// Shader license: MIT License
+// Created by: Jonathan B.
+// Website: www.solarfusionsoftware.com
+
+uniform vec2 rotateScene;
+
+const float MIN_DISTANCE = 0.0;
+const float MAX_DISTANCE = 50.0;
+const float PRECISION = 0.001;
+
+const int MAX_MARCHING_STEPS = 128;
+
+// 0.7 Default Apply exposure (how long the shutter is open)
+const float LIGHT_EXPOSURE = 0.7;
+// 0.02 Default Adds color to all color channels
+const float AMBIENT_OFFSET = 0.02;
+// The number below should really be dynamic with the distance
+// 1.5 Default How far to step past the current SDF
+const float STEP_PRECISION = 1.5 + 0.01; 
+// 1.1 Default IOR For refraction 1.0 = air to highest = 2.0
+const float INDEX_OF_REFRACTION = 1.1; 
+const int MAX_BOUNCE = 2;
+
+const vec3 backgroundColor = vec3(0.9);
+const vec3 lightColor = vec3(5.0);
+const vec3 lightDirection = normalize(vec3(-1.0, 0.75, 1.0));
+
+struct ShapeStyle
+{
+	int id;
+	float distance;
+};
+
+struct ShapeColor
+{
+    vec3 ambient;
+    float diffuse;
+    float alphaPercent;
+    float reflectPercent;
+    float refractPercent;
+};
+
+// Shapes
+float sdPlane(vec3 p, vec3 normal, float distance)
+{
+	// normal.xyz = point on plane must be normalized!
+	// distance = distance to plane
+	return dot(p, normalize(normal)) + distance;
+}
+
+float sdCapsule(vec3 p, float h, float r)
+{
+    p.y -= clamp(p.y,-h / 2.0, h / 2.0);
+    return length(p) - r;
+}
+
+// Operators
+ShapeStyle opUnion(ShapeStyle shape1, ShapeStyle shape2)
+{
+	// The lesser distance should be the output
+	if (shape1.distance > shape2.distance)
+	{
+		return shape2;
+	}
+	
+	return shape1;
+}
+
+// Rotates a point theta radians around the y-axis
+vec3 opYRotate(vec3 p, float theta)
+{
+	float cost = cos(theta); 
+	float sint = sin(theta);
+	
+	return vec3(p.x * cost + p.z * sint, p.y, - p.x * sint + p.z * cost);
+}
+
+// Rotates a point theta radians around the x-axis
+vec3 opXRotate(vec3 p, float theta)
+{
+	float cost = cos(theta); 
+	float sint = sin(theta);
+	
+	return vec3(p.x, p.y * cost - p.z * sint, p.y * sint + p.z * cost);
+}
+
+ShapeStyle scene(vec3 p)
+{
+    // Always create the floor for the scene
+    ShapeStyle floor = ShapeStyle(0, sdPlane(p, vec3(0.0, 1.0, 0.0), 2.0));
+
+    // Blue is left Red is right from neo's perspective
+    vec3 leftPosition = (opYRotate(p, iTime) - vec3(-2.5, 0, 0));
+    vec3 centerPosition = p;
+    vec3 rightPosition = (opYRotate(p, iTime) - vec3(2.5, 0, 0));
+
+    ShapeStyle capsuleLeft = ShapeStyle(1, sdCapsule(leftPosition, 1.0, 0.5));
+    ShapeStyle capsuleCenter = ShapeStyle(2, sdCapsule(centerPosition, 1.0, 0.5));
+    ShapeStyle capsuleRight = ShapeStyle(3, sdCapsule(rightPosition, 1.0, 0.5));
+
+    ShapeStyle shapes = floor;
+    shapes = opUnion(shapes, capsuleLeft);
+    shapes = opUnion(shapes, capsuleCenter);
+    shapes = opUnion(shapes, capsuleRight);
+
+    return shapes;
+}
+
+ShapeStyle raymarch(vec3 ro, vec3 rd)
+{
+    float depth = MIN_DISTANCE;
+	ShapeStyle shape;
+	
+	for (int i = 0; i < MAX_MARCHING_STEPS; i++)
+	{
+		vec3 p = ro + depth * rd;
+        shape = scene(p);
+        float distance = shape.distance;
+        depth += distance;
+
+		if (abs(distance) < PRECISION || depth > MAX_DISTANCE)
+		{
+			break;
+		}
+	}
+	
+	shape.distance = depth;
+	
+	return shape;
+}
+
+vec3 shapeNormal(vec3 p)
+{
+	const float h = PRECISION;
+	const vec2 k = vec2(1,-1);
+	
+	return normalize(
+		k.xyy * scene(p + k.xyy * h).distance +
+		k.yyx * scene(p + k.yyx * h).distance +
+		k.yxy * scene(p + k.yxy * h).distance +
+		k.xxx * scene(p + k.xxx * h).distance);
+}
+
+ShapeColor radianceColor(int id)
+{
+    ShapeColor shapeColor;
+
+    // The color of the shape
+    shapeColor.ambient = vec3(0);
+    // The contrast of the shape's color
+    shapeColor.diffuse = 0.0;
+    // 0.0 to 1.0 where 0.0 is lambert and 1.0 is transparent
+    shapeColor.alphaPercent = 0.0;
+    // 0.0 to 1.0 where 0.0 is lambert and 1.0 is reflective
+    shapeColor.reflectPercent = 0.0;
+    // 0.0 to 1.0 where 0.0 is lambert and 1.0 is refractive
+    shapeColor.refractPercent = 0.0;
+
+    // Gray Floor Lambert
+    if (id == 0)
+    {
+        shapeColor.ambient = vec3(0.5);
+        shapeColor.diffuse = 0.5;
+    }
+    // Blue Left Capsule Transparent
+    else if (id == 1)
+    {
+        shapeColor.ambient = vec3(0.0, 0.0, 1.0);
+        shapeColor.diffuse = 0.5;
+        shapeColor.alphaPercent = 0.5;
+    }
+    // Center Capsule Reflection
+    else if (id == 2)
+    {
+        shapeColor.ambient = vec3(0.3);
+        shapeColor.diffuse = 0.5;
+        shapeColor.reflectPercent = 0.5;
+    }
+    // Red Right Capsule Refraction
+    else if (id == 3)
+    {
+        shapeColor.ambient = vec3(1.0, 0.0, 0.0);
+        shapeColor.diffuse = 0.5;
+        shapeColor.refractPercent = 0.5;
+    }
+
+    if (length(shapeColor.ambient) > 0.0)
+    {
+        shapeColor.ambient += AMBIENT_OFFSET;
+    }
+
+    return shapeColor;
+}
+
+vec3 radiance(vec3 ro, vec3 rd)
+{
+    vec3 color = vec3(0);
+
+    for (int i = 0; i <= MAX_BOUNCE; i++)
+    {
+        ShapeStyle shape = raymarch(ro, rd);
+
+        if (shape.distance < MAX_DISTANCE)
+        {
+            ShapeColor rayColor = radianceColor(shape.id);
+
+            vec3 p = ro + rd * shape.distance;
+            vec3 n = shapeNormal(p);
+
+            // Blue Left Transparent Shape
+            if (rayColor.alphaPercent > 0.0)
+            {
+                // *** Originally from ChatGPT ***
+                //vec3 transCol = radiance(p + rd * PRECISION * 2.0, rd);
+                //color = mix(lighting, transCol, 0.6); // Blend ratio (adjustable)
+                // *** Originally from ChatGPT ***
+
+                vec3 lighting = clamp(dot(n, lightDirection), 0.0, 1.0) 
+                    * lightColor * rayColor.ambient * rayColor.diffuse;
+
+                rd = rd;
+                ro = p + rd * STEP_PRECISION;
+                
+                color += mix(lighting, color, rayColor.alphaPercent); // 0.6 Blend ratio (adjustable)
+            }
+            // Gray Center Reflective Shape
+            else if (rayColor.reflectPercent > 0.0)
+            {
+                // *** Originally from ChatGPT ***
+                //vec3 reflectDir = reflect(rd, n);
+                //vec3 reflectCol = radiance(p + reflectDir * PRECISION * 2.0, reflectDir);
+                //color = mix(lighting, reflectCol, 0.8); // Mostly reflective
+                // *** Originally from ChatGPT ***
+
+                ShapeStyle shadowRay = raymarch(p + 0.01 * lightDirection, lightDirection);
+
+                // Shadows appear on any reflective surface like the gray capsule
+                if (shadowRay.distance >= MAX_DISTANCE)
+                {
+                    vec3 lighting = clamp(dot(n, lightDirection), 0.0, 1.0) 
+                        * lightColor * rayColor.ambient * rayColor.diffuse;
+                
+                    color += mix(lighting, color, rayColor.reflectPercent);
+                }
+
+                rd = reflect(rd, n);
+                ro = p + rd * STEP_PRECISION;
+            }
+            // Red Right Refractive Shape
+            else if (rayColor.refractPercent > 0.0)
+            {
+                // *** Originally from ChatGPT ***
+                //float ior = 1.1; // Index of refraction
+                //vec3 refractDir = refract(rd, n, 1.0 / ior);
+                //vec3 refractCol = radiance(p + refractDir * PRECISION * 2.0, refractDir);
+                //color = mix(lighting, refractCol, 0.9); // Mostly refracted
+                // *** Originally from ChatGPT ***
+
+                vec3 lighting = clamp(dot(n, lightDirection), 0.0, 1.0) 
+                    * lightColor * rayColor.ambient * rayColor.diffuse;
+                
+                rd = refract(rd, n, 1.0 / INDEX_OF_REFRACTION);
+                ro = p + rd * STEP_PRECISION;
+
+                color = mix(lighting, color, rayColor.refractPercent);
+            }
+            // Gray Floor Lambert Shape
+            else
+            {
+                ShapeStyle shadowRay = raymarch(p + 0.01 * lightDirection, lightDirection);
+
+                // Shadows appear on any lambert surface like the floor
+                if (shadowRay.distance >= MAX_DISTANCE)
+                {
+                    color += clamp(dot(n, lightDirection), 0.0, 1.0) 
+                        * lightColor * rayColor.ambient * rayColor.diffuse;
+                }
+                // break can go here if using ray bounce 
+                break;
+            }
+        }
+        // Background with Spotlight
+        else
+        {
+            vec3 spotlight = vec3(1e6) * vec3(pow(max(dot(rd, lightDirection), 0.0), 250.0)); // 250.0
+            color += (backgroundColor + spotlight);
+            // break can go here if using ray bounce
+            break;
+        }
+    }
+
+    return color;
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+	vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
+
+	// The ro and rd z axes are reversed so that the z axis is like opengl
+	vec3 ro = vec3(0, 0, 8); // ray origin
+	ro = opXRotate(ro, rotateScene.x);
+	ro = opYRotate(ro, rotateScene.y);
+
+	vec3 rd = normalize(vec3(uv,-1.0)); // ray direction
+	rd = opXRotate(rd, rotateScene.x);
+	rd = opYRotate(rd, rotateScene.y);
+
+    fragColor = vec4(radiance(ro, rd) * LIGHT_EXPOSURE, 1.0);
+}
+
+// ************************** Do Not Remove **************************
+void main(void)
+{
+	mainImage(mainFragColor, gl_FragCoord.xy);
+}
+// ************************** Do Not Remove **************************
+
+
+</script>
+</head>
+	
+<!-- Version 1.0 -->
+
+<body onload="init();">
+	<script src="webgl.js"></script>
+	<script src="main.js"></script>
+</body>
+</html>
