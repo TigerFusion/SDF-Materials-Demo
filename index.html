@@ -24,9 +24,13 @@ uniform float iTimeDelta;
 out vec4 mainFragColor;
 // ************************** Do Not Remove **************************
 
-// I had a hard time finding any raymarching tutorials on this 
-// so I had to use ChatGPT to help figure the rest out. I did 
-// not use the exact code from ChatGPT but still noted it.
+// Inspired by Ray Tracing in one Weekend Book and Shadertoy:
+// Anottated Spheres Ray Tracer: https://www.shadertoy.com/view/4ljGRd
+// Demofox Article 3 Ray Tracer: https://www.shadertoy.com/view/ttfyzN
+// inspirnathan's Keyboard Tutorial: https://www.shadertoy.com/view/sdf3RS
+// As you may have guessed I had a hard time finding any raymarching 
+// tutorials on this so I had to use ChatGPT to help figure the rest out. 
+// I did not use the exact code from ChatGPT but still noted it.
 // Shader license: MIT License
 // Created by: Jonathan B.
 // Website: www.solarfusionsoftware.com
@@ -35,22 +39,22 @@ uniform vec2 rotateScene;
 
 const float MIN_DISTANCE = 0.0;
 const float MAX_DISTANCE = 50.0;
-const float PRECISION = 0.001;
+const float PRECISION = 0.0001;
 
-const int MAX_MARCHING_STEPS = 128;
+const int MAX_MARCHING_STEPS = 128; // 128
 
 // 0.7 Default Apply exposure (how long the shutter is open)
-const float LIGHT_EXPOSURE = 0.7;
+const float LIGHT_EXPOSURE = 0.8; // 0.7
 // 0.02 Default Adds color to all color channels
 const float AMBIENT_OFFSET = 0.02;
 // The number below should really be dynamic with the distance
 // 1.5 Default How far to step past the current SDF
-const float STEP_PRECISION = 1.5 + 0.01; 
+const float STEP_PRECISION = 1.5 + 0.0001; // 1.5 + 0.01
 // 1.1 Default IOR For refraction 1.0 = air to highest = 2.0
-const float INDEX_OF_REFRACTION = 1.1; 
-const int MAX_BOUNCE = 2;
+const float INDEX_OF_REFRACTION = 1.2; // 1.2
+const int MAX_BOUNCE = 5;
 
-const vec3 backgroundColor = vec3(0.9);
+const vec3 backgroundColor = vec3(0.7);
 const vec3 lightColor = vec3(5.0);
 const vec3 lightDirection = normalize(vec3(-1.0, 0.75, 1.0));
 
@@ -67,9 +71,11 @@ struct ShapeColor
     float alphaPercent;
     float reflectPercent;
     float refractPercent;
+    float dielectricPercent;
 };
 
 // Shapes
+// Taken from IQ's raymarching 3D SDFs article
 float sdPlane(vec3 p, vec3 normal, float distance)
 {
 	// normal.xyz = point on plane must be normalized!
@@ -77,6 +83,7 @@ float sdPlane(vec3 p, vec3 normal, float distance)
 	return dot(p, normalize(normal)) + distance;
 }
 
+// Taken from IQ's raymarching 3D SDFs article and modified
 float sdCapsule(vec3 p, float h, float r)
 {
     p.y -= clamp(p.y,-h / 2.0, h / 2.0);
@@ -122,15 +129,18 @@ ShapeStyle scene(vec3 p)
     vec3 leftPosition = (opYRotate(p, iTime) - vec3(-2.5, 0, 0));
     vec3 centerPosition = p;
     vec3 rightPosition = (opYRotate(p, iTime) - vec3(2.5, 0, 0));
+    vec3 backPosition = (opYRotate(p, iTime) - vec3(0, 0,-2.5));
 
     ShapeStyle capsuleLeft = ShapeStyle(1, sdCapsule(leftPosition, 1.0, 0.5));
     ShapeStyle capsuleCenter = ShapeStyle(2, sdCapsule(centerPosition, 1.0, 0.5));
-    ShapeStyle capsuleRight = ShapeStyle(3, sdCapsule(rightPosition, 1.0, 0.5));
+    ShapeStyle capsuleRight = ShapeStyle(3, sdCapsule(rightPosition, 1.0, 0.5)); // 1.0, 0.5
+    ShapeStyle capsuleBack = ShapeStyle(4, length(backPosition) - 1.0); // 1.0, 0.5
 
     ShapeStyle shapes = floor;
     shapes = opUnion(shapes, capsuleLeft);
     shapes = opUnion(shapes, capsuleCenter);
     shapes = opUnion(shapes, capsuleRight);
+    shapes = opUnion(shapes, capsuleBack);
 
     return shapes;
 }
@@ -145,7 +155,7 @@ ShapeStyle raymarch(vec3 ro, vec3 rd)
 		vec3 p = ro + depth * rd;
         shape = scene(p);
         float distance = shape.distance;
-        depth += distance;
+        depth += abs(distance);
 
 		if (abs(distance) < PRECISION || depth > MAX_DISTANCE)
 		{
@@ -158,6 +168,7 @@ ShapeStyle raymarch(vec3 ro, vec3 rd)
 	return shape;
 }
 
+// Taken from IQ's raymarching normals article
 vec3 shapeNormal(vec3 p)
 {
 	const float h = PRECISION;
@@ -170,7 +181,7 @@ vec3 shapeNormal(vec3 p)
 		k.xxx * scene(p + k.xxx * h).distance);
 }
 
-ShapeColor radianceColor(int id)
+ShapeColor radianceColor(int id, vec3 p)
 {
     ShapeColor shapeColor;
 
@@ -184,17 +195,20 @@ ShapeColor radianceColor(int id)
     shapeColor.reflectPercent = 0.0;
     // 0.0 to 1.0 where 0.0 is lambert and 1.0 is refractive
     shapeColor.refractPercent = 0.0;
+    // 0.0 to 1.0 where 0.0 is lambert and 1.0 is dielectric
+    shapeColor.dielectricPercent = 0.0;
 
     // Gray Floor Lambert
     if (id == 0)
     {
         shapeColor.ambient = vec3(0.5);
+        //shapeColor.ambient = 1.0 + 1.0 * vec3(-0.7 + mod(floor(p.x) + floor(p.z), 2.0)); // vec3(0.5)
         shapeColor.diffuse = 0.5;
     }
     // Blue Left Capsule Transparent
     else if (id == 1)
     {
-        shapeColor.ambient = vec3(0.0, 0.0, 1.0);
+        shapeColor.ambient = vec3(0, 0, 1);
         shapeColor.diffuse = 0.5;
         shapeColor.alphaPercent = 0.5;
     }
@@ -208,11 +222,19 @@ ShapeColor radianceColor(int id)
     // Red Right Capsule Refraction
     else if (id == 3)
     {
-        shapeColor.ambient = vec3(1.0, 0.0, 0.0);
+        shapeColor.ambient = vec3(1, 0, 0);
         shapeColor.diffuse = 0.5;
         shapeColor.refractPercent = 0.5;
     }
-
+    // Green Back Capsule Dielectric
+    else if (id == 4)
+    {
+        shapeColor.ambient = vec3(0);
+        shapeColor.diffuse = 0.0;
+        shapeColor.dielectricPercent = 1.0;
+    }
+    
+    // If there is color add a little more to each channel so the spotlight shows better
     if (length(shapeColor.ambient) > 0.0)
     {
         shapeColor.ambient += AMBIENT_OFFSET;
@@ -221,9 +243,18 @@ ShapeColor radianceColor(int id)
     return shapeColor;
 }
 
+// Inspired by several ray tracer shaders
 vec3 radiance(vec3 ro, vec3 rd)
 {
     vec3 color = vec3(0);
+
+    /*const float MAX_FOG = 50.0;
+    const float MIN_FOG = 10.0;
+
+    //ShapeStyle fogShape = raymarch(ro, rd);
+
+    float fog = clamp((MAX_FOG - fogShape.distance) / (MAX_FOG - MIN_FOG), 0.0, 1.0);
+    color = mix(vec3(0.5), color, fog);*/
 
     for (int i = 0; i <= MAX_BOUNCE; i++)
     {
@@ -231,10 +262,10 @@ vec3 radiance(vec3 ro, vec3 rd)
 
         if (shape.distance < MAX_DISTANCE)
         {
-            ShapeColor rayColor = radianceColor(shape.id);
-
             vec3 p = ro + rd * shape.distance;
             vec3 n = shapeNormal(p);
+
+            ShapeColor rayColor = radianceColor(shape.id, p);
 
             // Blue Left Transparent Shape
             if (rayColor.alphaPercent > 0.0)
@@ -293,6 +324,36 @@ vec3 radiance(vec3 ro, vec3 rd)
 
                 color = mix(lighting, color, rayColor.refractPercent);
             }
+            
+            // Dielectric
+            else if (rayColor.dielectricPercent > 0.0)
+            {
+                // ***** Taken from https://www.shadertoy.com/view/lclcW8 *****
+                //const float ETA = 1.69; // glass 1.69, water 1.33，1.0 air
+                const float ior = 1.5;
+                vec3 refrRD1 = refract(rd, n, 1.0 / ior);
+                vec3 refrRO1 = p - (STEP_PRECISION * n); // move origin into the sphere
+                //vec3 refrRO1 = p + 5. * PRECISION * refrRD1; // not working
+                ShapeStyle refrCO1 = raymarch(refrRO1, refrRD1);
+                vec3 refrP1 = refrRO1 + refrRD1 * refrCO1.distance;
+                vec3 refrN1 = shapeNormal(refrP1);
+
+                vec3 refrRD2 = refract(refrRD1, -refrN1, ior);
+                vec3 refrRO2 = refrP1 + (STEP_PRECISION * refrN1); // move origin outside the sphere
+                //vec3 refrRO2 = refrP1 + 5. * PRECISION * refrRD2; // not working
+                ShapeStyle refrCO2 = raymarch(refrRO2, refrRD2);
+                vec3 refrP2 = refrRO2 + refrRD2 * refrCO2.distance;
+                vec3 refrN2 = shapeNormal(refrP2);
+                refrCO2.distance += refrCO1.distance + shape.distance;
+
+                rd = refrRD2;
+                ro = refrRO2;
+
+                vec3 lighting = clamp(dot(refrN2, lightDirection), 0.0, 1.0) 
+                    * lightColor * rayColor.ambient * rayColor.diffuse;
+
+                color = mix(lighting, color, rayColor.dielectricPercent);
+            }
             // Gray Floor Lambert Shape
             else
             {
@@ -304,6 +365,7 @@ vec3 radiance(vec3 ro, vec3 rd)
                     color += clamp(dot(n, lightDirection), 0.0, 1.0) 
                         * lightColor * rayColor.ambient * rayColor.diffuse;
                 }
+
                 // break can go here if using ray bounce 
                 break;
             }
@@ -313,6 +375,7 @@ vec3 radiance(vec3 ro, vec3 rd)
         {
             vec3 spotlight = vec3(1e6) * vec3(pow(max(dot(rd, lightDirection), 0.0), 250.0)); // 250.0
             color += (backgroundColor + spotlight);
+
             // break can go here if using ray bounce
             break;
         }
@@ -321,6 +384,7 @@ vec3 radiance(vec3 ro, vec3 rd)
     return color;
 }
 
+// Taken from ray tracer
 void mainImage(out vec4 fragColor, in vec2 fragCoord)
 {
 	vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
