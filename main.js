@@ -102,6 +102,7 @@ class Project
         
         // uniforms
         this.shaderProgram.u_resolutionLoc = gl.getUniformLocation(this.shaderProgram, "iResolution");
+        this.shaderProgram.u_mouseLoc = gl.getUniformLocation(this.shaderProgram, "iMouse");
         this.shaderProgram.u_timeLoc = gl.getUniformLocation(this.shaderProgram, "iTime");
         this.shaderProgram.u_timeDeltaLoc = gl.getUniformLocation(this.shaderProgram, "iTimeDelta");
         this.shaderProgram.u_rotateScene = gl.getUniformLocation(this.shaderProgram, "rotateScene");
@@ -258,7 +259,7 @@ class Project
 
             // Clamp from starting x-axis rotation to the x-axis at 90 degrees
             this.angle[0] = Math.max(this.angle[0], -Math.PI / 2.0);
-            this.angle[0] = Math.min(this.angle[0], 0.1);
+            this.angle[0] = Math.min(this.angle[0], 0.2);
 
             gl.uniform2fv(this.shaderProgram.u_rotateScene, this.angle);
 
